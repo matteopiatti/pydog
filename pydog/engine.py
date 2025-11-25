@@ -1,0 +1,94 @@
+from .state import GameState
+from .board import Board
+from .cards import Deck
+from .objects import Player, Marble
+from .enums import Colors, GamePhase
+from .rules import legal_actions
+from .move import start_action
+from agent.agent import Agent
+
+
+def setup_game(num_players: int, agents: list[Agent], rules=None) -> GameState:
+    deck = Deck(seven=rules["include_split"], jack=rules["include_swap"])
+    deck.shuffle()
+    players = [
+        Player(
+            name=f"Player {color.name.capitalize()}",
+            marbles=[Marble(color) for _ in range(4)],
+        )
+        for color in list(Colors)[:num_players]
+    ]
+    board = Board(players=players)
+    teams = [
+        (players[0], players[2]),
+        (players[1], players[3]),
+    ]
+    agents_dict = {player: agent for player, agent in zip(players, agents)}
+    return GameState(
+        players=players,
+        board=board,
+        deck=deck,
+        current_player=players[0],
+        last_started_player=players[0],
+        teams=teams,
+        agents=agents_dict,
+        rules=rules,
+    )
+
+
+def step(state: GameState) -> GameState:
+    agent = state.agents[state.current_player]
+
+    state.check_winner()
+    if state.finished:
+        return state
+
+    if state.phase == GamePhase.DEAL:
+        state.advance_round()
+        deal_cards(state)
+        if state.rules.get("include_switch_team_cards", True):
+            state.phase = GamePhase.SWITCH
+        else:
+            state.phase = GamePhase.TURN
+        return state
+
+    elif state.phase == GamePhase.SWITCH:
+        selected_card = agent.select_switch_card(state, state.current_player.hand)
+        state.switch_cards.append((state.current_player, selected_card))
+
+        if len(state.switch_cards) < len(state.players):
+            state.advance_player()
+            return state
+        elif len(state.switch_cards) == len(state.players):
+            for player_from, card in state.switch_cards:
+                state.teammate(player_from).receive_card(card)
+                player_from.play_card(card)
+            state.switch_cards.clear()
+            state.phase = GamePhase.TURN
+            return state
+    elif state.phase == GamePhase.TURN:
+        if state.empty_hands:
+            state.phase = GamePhase.DEAL
+            return state
+        state.cp_actions = legal_actions(state)
+        if not state.cp_actions:
+            agent.no_actions()
+            state.current_player.fold()
+            state.advance_player()
+        else:
+            state.phase = GamePhase.PLAY
+        return state
+
+    elif state.phase == GamePhase.PLAY:
+        action = agent.select_action(state, state.cp_actions, state.current_player)
+        start_action(state, action)
+        state.current_player.play_card(action.card)
+        state.reset_actions()
+        state.advance_player()
+        state.phase = GamePhase.TURN
+        return state
+
+
+def deal_cards(state: GameState) -> None:
+    for player in state.players:
+        player.receive_hand(state.deck.deal(state.draw_size))
